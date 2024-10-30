@@ -2,7 +2,6 @@
 import argparse
 import os
 import random
-import time
 
 import matplotlib.pyplot as plt
 import numpy as np
@@ -13,6 +12,8 @@ import torch.optim as optim
 from sklearn.metrics import (accuracy_score, f1_score, precision_score,
                              recall_score)
 from torch.utils.data import DataLoader, TensorDataset, random_split
+
+from main_skip import SkipAE
 
 
 # 랜덤 시드 고정
@@ -33,7 +34,7 @@ set_seed(42)  # 시드 고정 값 사용
 
 parser = argparse.ArgumentParser(description="Training script")
 parser.add_argument("--batch_size", default=256, type=int, help="size of batch")
-parser.add_argument("--epochs", default=10, type=int, help="epoch")
+parser.add_argument("--epochs", default=100, type=int, help="epoch")
 parser.add_argument("--lr", default=1e-2, type=float, help="learning rate")
 parser.add_argument("--latent_size", default=5, type=int, help="latent size")
 parser.add_argument("--feature_size", default=128, type=int, help="feature size")
@@ -51,45 +52,46 @@ optimizer = args.optimizer
 # Autoencoder 모델 정의
 
 
-class Autoencoder(nn.Module):
+class SkipAE(nn.Module):
     def __init__(self):
-        super(Autoencoder, self).__init__()
-        self.encoder = nn.Sequential(
-            nn.Linear(784, 2*feature_size),
-            nn.ReLU(),
-            nn.Linear(2*feature_size, feature_size),
-            nn.ReLU(),
-            nn.Linear(feature_size, latent_size)
-        )
-        self.decoder = nn.Sequential(
-            nn.Linear(latent_size, feature_size),
-            nn.ReLU(),
-            nn.Linear(feature_size, 2*feature_size),
-            nn.ReLU(),
-            nn.Linear(2*feature_size, 784),
-            nn.Sigmoid()
-        )
+        super(SkipAE, self).__init__()
+        # Encoder layers
+        self.encoder_1 = nn.Linear(784, 256)
+        self.encoder_2 = nn.Linear(256, 128)
+        self.encoder_3 = nn.Linear(128, 10)
+
+        # Decoder layers
+        self.decoder_1 = nn.Linear(10, 128)
+        self.decoder_2 = nn.Linear(128, 256)  # Adjusted Skip Connection
+        self.decoder_3 = nn.Linear(256, 784)  # Adjusted Skip Connection
+
+        self.relu = nn.ReLU()
+        self.sigmoid = nn.Sigmoid()
 
     def forward(self, x):
-        x = self.encoder(x)
-        x = self.decoder(x)
-        return x
+        # Encoder
+        x1 = self.relu(self.encoder_1(x))
+        x2 = self.relu(self.encoder_2(x1))
+        encoded = self.encoder_3(x2)
+
+        # Decoder with adjusted Skip Connections using element-wise addition
+        d1 = self.relu(self.decoder_1(encoded))
+        d1 = d1 + x2
+        d2 = self.relu(self.decoder_2(d1))
+        d2 = d2 + x1
+        decoded = self.sigmoid(self.decoder_3(d2))
+
+        return decoded
 
 
 # 모델, 손실 함수, 옵티마이저 정의
-device = torch.device("cuda:0" if torch.cuda.is_available() else "cpu")
-model = Autoencoder().to(device)
+device = torch.device("cuda:2" if torch.cuda.is_available() else "cpu")
+model = SkipAE().to(device)
 loss_fn = nn.MSELoss()
 if optimizer == 'adam':
     optimizer = optim.Adam(model.parameters(), lr=learning_rate)
 elif optimizer == 'adamw':
     optimizer = optim.AdamW(model.parameters(), lr=learning_rate)
-elif optimizer == 'rmsprop':
-    optimizer = optim.RMSprop(model.parameters(), lr=learning_rate)
-elif optimizer == 'sgd':
-    optimizer = optim.SGD(model.parameters(), lr=learning_rate)
-elif optimizer == 'adagrad':
-    optimizer = optim.Adagrad(model.parameters(), lr=learning_rate)
 
 
 # threshold 설정 기준
@@ -133,7 +135,6 @@ def find_best_threshold(thresholds, valid_errors, y_valid_combined):
 
 # 데이터 로드 및 전처리 (수정 불가)
 
-start = time.time()
 
 # EMNIST 데이터 로드
 train_data = pd.read_csv('./data/emnist-balanced-train.csv', header=None)
@@ -194,8 +195,8 @@ test_digits_dataset = TensorDataset(torch.tensor(X_test_digits), torch.zeros(X_t
 test_letters_dataset = TensorDataset(torch.tensor(X_test_letters), torch.ones(X_test_letters.shape[0]))
 
 # DataLoader 생성
-train_loader = DataLoader(train_dataset, batch_size=batch_size, shuffle=True)
-valid_loader = DataLoader(valid_dataset_final, batch_size=batch_size, shuffle=True)
+train_loader = DataLoader(train_dataset, batch_size=batch_size, shuffle=False)
+valid_loader = DataLoader(valid_dataset_final, batch_size=batch_size, shuffle=False)
 test_digits_loader = DataLoader(test_digits_dataset, batch_size=batch_size)
 test_letters_loader = DataLoader(test_letters_dataset, batch_size=batch_size)
 
@@ -215,6 +216,9 @@ for epoch in range(num_epochs):
 
         # 순전파
         outputs = model(data)
+        # Save the output images
+        output_images = outputs.view(-1, 28, 28).cpu().detach().numpy()
+
         loss = loss_fn(outputs, data)
 
         # 역전파 및 최적화
@@ -241,6 +245,21 @@ def evaluate(loader):
             reconstruction_error = np.mean(np.abs(reconstructed - data.cpu().numpy()), axis=1)
             reconstruction_errors.extend(reconstruction_error)
             labels.extend(label.numpy())  # 실제 라벨 저장
+    # Concatenate input and output images for visualization
+    input_images = data.view(-1, 28, 28).cpu().detach().numpy()
+    reconstructed_images = reconstructed.reshape(-1, 28, 28)
+
+    # Concatenate input and reconstructed images side by side
+    concatenated_images = np.concatenate(
+        [np.concatenate((input_images[i], reconstructed_images[i]), axis=1) for i in range(5)], axis=0)
+
+    # Plot and save the concatenated images
+    plt.figure(figsize=(10, 10))
+    plt.imshow(concatenated_images, cmap='gray')
+    plt.axis('off')
+    plt.savefig(f'result/output_skip_image.png')
+    plt.close()
+
     return np.array(reconstruction_errors), np.array(labels)
 
 
@@ -297,34 +316,19 @@ plt.show()
 
 # Save results to CSV
 plt.savefig(f'result/f_{feature_size}_l_{latent_size}.png')  # Save the figure
-# Extract the highest and lowest 5 values from the loss array
-top_5_losses = sorted(loss_arr, reverse=True)[:5]
-bottom_5_losses = sorted(loss_arr)[:5]
-
-end = time.time()
-execution_time = end - start
-print(f"Execution Time: {execution_time:.4f} seconds")
-
 results = [{
-    "Learning Rate": learning_rate,
-    "Batch Size": batch_size,
-    "Latent Size": latent_size,
     "Feature Size": feature_size,
-    "epochs": num_epochs,
-    "Optimizer": optimizer.__class__.__name__,
+    "Latent Size": latent_size,
     "Accuracy": round(test_accuracy, 4),
     "Precision": round(test_precision, 4),
     "Recall": round(test_recall, 4),
     "F1-Score": round(test_f1, 4),
-    "Best Threshold": round(best_threshold, 4),
-    "Top 5 Train Loss": [round(i, 4) for i in top_5_losses],
-    "Bottom 5 Train Loss": [round(i, 4) for i in bottom_5_losses],
-    "Execution Time": round(execution_time, 4)
+    "Train Loss": [round(i, 4) for i in loss_arr],
 }]
 results_df = pd.DataFrame(results)
 # Load existing results if the file exists
 
-results_file = f"result/test_results_lr.csv"
+results_file = f"result/test_results_skipAE.csv"
 if os.path.exists(results_file):
     existing_results_df = pd.read_csv(results_file)
     results_df = pd.concat([existing_results_df, results_df], ignore_index=True)

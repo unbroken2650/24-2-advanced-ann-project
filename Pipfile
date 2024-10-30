@@ -9,6 +9,9 @@ numpy = "*"
 pandas = "*"
 scikit-learn = "*"
 matplotlib = "*"
+requests = "*"
+scikit-image = "*"
+opencv-python = "*"
 
 [dev-packages]
 ipykernel = "*"
